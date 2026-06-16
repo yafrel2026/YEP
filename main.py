@@ -38,7 +38,7 @@ def obtener_token_azure():
     return response.json()['access_token']
 
 def obtener_o_crear_carpeta_raiz(headers):
-    url = f"https://login.microsoft.com{MICROSOFT_USER_EMAIL}/drive/root/children"
+    url = f"https://graph.microsoft.com/{MICROSOFT_USER_EMAIL}/drive/root/children"
     folder_data = {
         "name": "Yafrel Medical Care",
         "folder": {},
