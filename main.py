@@ -1,4 +1,3 @@
-```python
 import base64
 import logging
 import os
@@ -441,4 +440,3 @@ def health_check():
         "status": "running",
         "service": "Yafrel OneDrive Sync"
     }
-```
