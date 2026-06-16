@@ -35,11 +35,13 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 MICROSOFT_USER_EMAIL = "yafrelservices@yafrel.com"
 
 ODOO_DOCUMENTS_FOLDER_ID = 1
-
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
+DELETE_ATTACHMENTS = True
+
+
 # =====================================================================
-# VALIDACIÓN DE VARIABLES DE ENTORNO
+# VALIDACIÓN
 # =====================================================================
 
 required_vars = {
@@ -52,9 +54,7 @@ required_vars = {
 missing = [k for k, v in required_vars.items() if not v]
 
 if missing:
-    raise RuntimeError(
-        f"Faltan variables de entorno obligatorias: {', '.join(missing)}"
-    )
+    raise RuntimeError(f"Faltan variables de entorno: {', '.join(missing)}")
 
 
 # =====================================================================
@@ -62,17 +62,10 @@ if missing:
 # =====================================================================
 
 def limpiar_nombre(nombre: str) -> str:
-    """
-    Elimina caracteres inválidos para OneDrive.
-    """
     return re.sub(r'[<>:"/\\|?*]', "_", nombre).strip()
 
 
 def obtener_token_azure() -> str:
-    """
-    Obtiene token OAuth para Microsoft Graph.
-    """
-
     url = (
         f"https://login.microsoftonline.com/"
         f"{AZURE_TENANT_ID}/oauth2/v2.0/token"
@@ -85,108 +78,87 @@ def obtener_token_azure() -> str:
         "scope": "https://graph.microsoft.com/.default"
     }
 
-    response = requests.post(url, data=data)
-    response.raise_for_status()
+    r = requests.post(url, data=data)
+    r.raise_for_status()
+    return r.json()["access_token"]
 
-    return response.json()["access_token"]
 
+def get_headers():
+    token = obtener_token_azure()
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+
+# =====================================================================
+# ONE DRIVE ROOT FOLDER (FIX DEFINITIVO)
+# =====================================================================
 
 def obtener_o_crear_carpeta_raiz(headers):
-    """
-    Crea o recupera la carpeta principal:
-    Yafrel Medical Care
-    """
 
-    url = (
+    url_list = (
         f"{GRAPH_BASE_URL}/users/"
         f"{MICROSOFT_USER_EMAIL}/drive/root/children"
     )
 
-    folder_data = {
-        "name": "Yafrel Medical Care",
-        "folder": {},
-        "@microsoft.graph.conflictBehavior": "replace"
-    }
+    r = requests.get(url_list, headers=headers)
+    r.raise_for_status()
 
-    response = requests.post(
-        url,
-        json=folder_data,
-        headers=headers
+    items = r.json().get("value", [])
+
+    for item in items:
+        if item.get("name") == "Yafrel Medical Care":
+            return item["id"]
+
+    # si no existe, crearla
+    url_create = (
+        f"{GRAPH_BASE_URL}/users/"
+        f"{MICROSOFT_USER_EMAIL}/drive/root/children"
     )
 
-    response.raise_for_status()
+    data = {
+        "name": "Yafrel Medical Care",
+        "folder": {},
+        "@microsoft.graph.conflictBehavior": "rename"
+    }
 
-    data = response.json()
+    r = requests.post(url_create, json=data, headers=headers)
+    r.raise_for_status()
 
-    return data.get("id")
+    return r.json()["id"]
 
 
 # =====================================================================
-# PROCESAMIENTO PRINCIPAL
+# PROCESAMIENTO
 # =====================================================================
 
-def procesar_sincronizacion(applicant_id: int):
+def procesar_sincronizacion(payload: dict):
 
     try:
+        applicant_id = payload.get("id")
+
+        nombre_aspirante = limpiar_nombre(
+            payload.get("display_name", f"Candidato_{applicant_id}")
+        )
+
+        attachment_ids = payload.get("attachment_ids", [])
 
         logging.info(
-            f"Iniciando sincronización para applicant_id={applicant_id}"
+            f"Procesando {nombre_aspirante} ({applicant_id}) "
+            f"- adjuntos: {len(attachment_ids)}"
         )
 
         models = xmlrpc.client.ServerProxy(
             f"{ODOO_URL}/xmlrpc/2/object"
         )
 
-        token = obtener_token_azure()
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-
+        headers = get_headers()
         raiz_id = obtener_o_crear_carpeta_raiz(headers)
 
-        # =============================================================
-        # OBTENER ASPIRANTE
-        # =============================================================
-
-        aspirante = models.execute_kw(
-            ODOO_DB,
-            ODOO_USER_ID,
-            ODOO_PASSWORD,
-            "hr.applicant",
-            "read",
-            [[applicant_id]],
-            {
-                "fields": [
-                    "name",
-                    "partner_name",
-                    "attachment_ids"
-                ]
-            }
-        )
-
-        if not aspirante:
-            logging.error(
-                f"No se encontró el aplicante {applicant_id}"
-            )
-            return
-
-        aspirante = aspirante[0]
-
-        nombre_aspirante = (
-            aspirante.get("partner_name")
-            or aspirante.get("name")
-            or f"Candidato_{applicant_id}"
-        )
-
-        nombre_aspirante = limpiar_nombre(nombre_aspirante)
-
-        attachment_ids = aspirante.get("attachment_ids", [])
-
-        # =============================================================
-        # VERIFICAR SI YA EXISTE
-        # =============================================================
+        # =========================================================
+        # VERIFICAR EXISTENCIA EN ODOO DOCUMENTS
+        # =========================================================
 
         doc_existe = models.execute_kw(
             ODOO_DB,
@@ -195,65 +167,38 @@ def procesar_sincronizacion(applicant_id: int):
             "documents.document",
             "search_count",
             [[
-                [
-                    "folder_id",
-                    "=",
-                    ODOO_DOCUMENTS_FOLDER_ID
-                ],
-                [
-                    "name",
-                    "=",
-                    f"Expediente - {nombre_aspirante}"
-                ]
+                ["folder_id", "=", ODOO_DOCUMENTS_FOLDER_ID],
+                ["name", "=", f"Expediente - {nombre_aspirante}"]
             ]]
         )
 
-        if doc_existe > 0:
-            logging.info(
-                f"{nombre_aspirante} ya tiene expediente."
-            )
+        if doc_existe:
+            logging.info("Ya existe expediente, saltando")
             return
 
-        logging.info(
-            f"Procesando candidato: {nombre_aspirante}"
-        )
+        # =========================================================
+        # CREAR CARPETA CANDIDATO
+        # =========================================================
 
-        # =============================================================
-        # CREAR CARPETA DEL CANDIDATO
-        # =============================================================
-
-        url_postulante = (
-            f"{GRAPH_BASE_URL}/users/"
-            f"{MICROSOFT_USER_EMAIL}/drive/items/"
+        url_folder = (
+            f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
             f"{raiz_id}/children"
         )
 
-        postulante_data = {
+        r = requests.post(url_folder, json={
             "name": nombre_aspirante,
             "folder": {},
             "@microsoft.graph.conflictBehavior": "rename"
-        }
+        }, headers=headers)
 
-        response = requests.post(
-            url_postulante,
-            json=postulante_data,
-            headers=headers
-        )
+        r.raise_for_status()
+        folder_id = r.json()["id"]
 
-        response.raise_for_status()
+        # =========================================================
+        # SUBIR ARCHIVOS
+        # =========================================================
 
-        res_postulante = response.json()
-
-        postulante_folder_id = res_postulante.get("id")
-
-        if not postulante_folder_id:
-            raise Exception(
-                "No fue posible obtener el ID de la carpeta."
-            )
-
-        # =============================================================
-        # SUBIR ADJUNTOS
-        # =============================================================
+        archivos_ok = 0
 
         if attachment_ids:
 
@@ -264,124 +209,94 @@ def procesar_sincronizacion(applicant_id: int):
                 "ir.attachment",
                 "read",
                 [attachment_ids],
-                {
-                    "fields": [
-                        "name",
-                        "datas"
-                    ]
-                }
+                {"fields": ["name", "datas"]}
             )
 
-            for adjunto in adjuntos:
+            for a in adjuntos:
 
-                file_name = limpiar_nombre(
-                    adjunto["name"]
-                )
+                if not a.get("datas"):
+                    continue
 
-                file_content = base64.b64decode(
-                    adjunto["datas"]
-                )
+                file_name = limpiar_nombre(a["name"])
+                content = base64.b64decode(a["datas"])
 
                 url_upload = (
-                    f"{GRAPH_BASE_URL}/users/"
-                    f"{MICROSOFT_USER_EMAIL}/drive/items/"
-                    f"{postulante_folder_id}:/"
-                    f"{file_name}:/content"
+                    f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
+                    f"{folder_id}:/{file_name}:/content"
                 )
 
-                headers_file = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/octet-stream"
-                }
-
-                upload_response = requests.put(
+                r = requests.put(
                     url_upload,
-                    data=file_content,
-                    headers=headers_file
+                    data=content,
+                    headers={
+                        "Authorization": headers["Authorization"],
+                        "Content-Type": "application/octet-stream"
+                    }
                 )
 
-                upload_response.raise_for_status()
+                r.raise_for_status()
+                archivos_ok += 1
 
-                logging.info(
-                    f"Archivo cargado: {file_name}"
-                )
-
-        # =============================================================
-        # CREAR ENLACE COMPARTIDO
-        # =============================================================
+        # =========================================================
+        # LINK
+        # =========================================================
 
         url_link = (
-            f"{GRAPH_BASE_URL}/users/"
-            f"{MICROSOFT_USER_EMAIL}/drive/items/"
-            f"{postulante_folder_id}/createLink"
+            f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
+            f"{folder_id}/createLink"
         )
 
-        link_data = {
+        r = requests.post(url_link, json={
             "type": "view",
             "scope": "organization"
-        }
+        }, headers=headers)
 
-        response_link = requests.post(
-            url_link,
-            json=link_data,
-            headers=headers
-        )
+        r.raise_for_status()
 
-        response_link.raise_for_status()
+        onedrive_url = r.json().get("link", {}).get("webUrl")
 
-        res_link = response_link.json()
+        if not onedrive_url:
+            raise Exception("No se generó link")
 
-        onedrive_url = (
-            res_link.get("link", {})
-            .get("webUrl")
-        )
+        # =========================================================
+        # ODOO DOCUMENT
+        # =========================================================
 
-        # =============================================================
-        # CREAR DOCUMENTO EN ODOO
-        # =============================================================
-
-        if onedrive_url:
-
-            document_data = {
+        doc_id = models.execute_kw(
+            ODOO_DB,
+            ODOO_USER_ID,
+            ODOO_PASSWORD,
+            "documents.document",
+            "create",
+            [{
                 "name": f"Expediente - {nombre_aspirante}",
                 "type": "url",
                 "url": onedrive_url,
                 "folder_id": ODOO_DOCUMENTS_FOLDER_ID
-            }
+            }]
+        )
+
+        logging.info(f"Documento creado {doc_id}")
+
+        # =========================================================
+        # DELETE ATTACHMENTS (SEGURO)
+        # =========================================================
+
+        if DELETE_ATTACHMENTS and attachment_ids and archivos_ok == len(attachment_ids):
 
             models.execute_kw(
                 ODOO_DB,
                 ODOO_USER_ID,
                 ODOO_PASSWORD,
-                "documents.document",
-                "create",
-                [document_data]
+                "ir.attachment",
+                "unlink",
+                [attachment_ids]
             )
 
-            logging.info(
-                f"Expediente creado para "
-                f"{nombre_aspirante}"
-            )
-
-        else:
-            logging.warning(
-                "No se recibió URL de OneDrive."
-            )
-
-    except requests.exceptions.HTTPError as e:
-
-        logging.error(
-            f"Error HTTP Microsoft Graph: {str(e)}"
-        )
-
-        if e.response is not None:
-            logging.error(e.response.text)
+            logging.info("Adjuntos eliminados correctamente")
 
     except Exception as e:
-
-        logging.exception(
-            f"Error durante la sincronización: {str(e)}"
-        )
+        logging.exception(f"Error: {str(e)}")
 
 
 # =====================================================================
@@ -389,54 +304,22 @@ def procesar_sincronizacion(applicant_id: int):
 # =====================================================================
 
 @app.post("/webhook")
-async def recibir_odoo_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks
-):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
 
-    try:
+    payload = await request.json()
 
-        payload = await request.json()
+    if not payload.get("id"):
+        return {"status": "ignored"}
 
-        applicant_id = payload.get("id")
+    background_tasks.add_task(procesar_sincronizacion, payload)
 
-        if applicant_id is None:
-
-            return {
-                "status": "ignored",
-                "message": "No se detectó ID de postulante"
-            }
-
-        background_tasks.add_task(
-            procesar_sincronizacion,
-            int(applicant_id)
-        )
-
-        return {
-            "status": "success",
-            "message": "Procesando en segundo plano"
-        }
-
-    except Exception as e:
-
-        logging.exception(
-            "Error recibiendo webhook"
-        )
-
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    return {"status": "ok"}
 
 
 # =====================================================================
-# HEALTH CHECK
+# HEALTH
 # =====================================================================
 
 @app.get("/")
-def health_check():
-
-    return {
-        "status": "running",
-        "service": "Yafrel OneDrive Sync"
-    }
+def health():
+    return {"status": "running"}
