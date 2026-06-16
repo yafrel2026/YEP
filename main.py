@@ -13,7 +13,7 @@ app = FastAPI()
 # =====================================================================
 # CONFIGURACIÓN SEGURA MEDIANTE VARIABLES DE ENTORNO
 # =====================================================================
-ODOO_URL = "https://yafrel.com"
+ODOO_URL = "https://yep.yafrel.com"
 ODOO_DB = "yafrel-education-platform"
 ODOO_USER_ID = 2
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
