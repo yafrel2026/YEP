@@ -26,7 +26,7 @@ MICROSOFT_USER_EMAIL = "yafrelservices@yafrel.com"
 ODOO_DOCUMENTS_FOLDER_ID = 1  # ID de tu carpeta Reclutamiento
 
 def obtener_token_azure():
-    url = f"https://microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
     data = {
         'grant_type': 'client_credentials',
         'client_id': AZURE_CLIENT_ID,
