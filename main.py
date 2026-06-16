@@ -66,10 +66,7 @@ def limpiar_nombre(nombre: str) -> str:
 
 
 def obtener_token_azure() -> str:
-    url = (
-        f"https://login.microsoftonline.com/"
-        f"{AZURE_TENANT_ID}/oauth2/v2.0/token"
-    )
+    url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
 
     data = {
         "grant_type": "client_credentials",
@@ -92,40 +89,29 @@ def get_headers():
 
 
 # =====================================================================
-# ONE DRIVE ROOT FOLDER (FIX DEFINITIVO)
+# ROOT FOLDER
 # =====================================================================
 
 def obtener_o_crear_carpeta_raiz(headers):
 
-    url_list = (
-        f"{GRAPH_BASE_URL}/users/"
-        f"{MICROSOFT_USER_EMAIL}/drive/root/children"
-    )
+    url_list = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
 
     r = requests.get(url_list, headers=headers)
     r.raise_for_status()
 
-    items = r.json().get("value", [])
-
-    for item in items:
+    for item in r.json().get("value", []):
         if item.get("name") == "Yafrel Medical Care":
             return item["id"]
 
-    # si no existe, crearla
-    url_create = (
-        f"{GRAPH_BASE_URL}/users/"
-        f"{MICROSOFT_USER_EMAIL}/drive/root/children"
-    )
+    url_create = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
 
-    data = {
+    r = requests.post(url_create, json={
         "name": "Yafrel Medical Care",
         "folder": {},
         "@microsoft.graph.conflictBehavior": "rename"
-    }
+    }, headers=headers)
 
-    r = requests.post(url_create, json=data, headers=headers)
     r.raise_for_status()
-
     return r.json()["id"]
 
 
@@ -144,20 +130,15 @@ def procesar_sincronizacion(payload: dict):
 
         attachment_ids = payload.get("attachment_ids", [])
 
-        logging.info(
-            f"Procesando {nombre_aspirante} ({applicant_id}) "
-            f"- adjuntos: {len(attachment_ids)}"
-        )
+        logging.info(f"Procesando {nombre_aspirante} ({applicant_id})")
 
-        models = xmlrpc.client.ServerProxy(
-            f"{ODOO_URL}/xmlrpc/2/object"
-        )
+        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
         headers = get_headers()
         raiz_id = obtener_o_crear_carpeta_raiz(headers)
 
         # =========================================================
-        # VERIFICAR EXISTENCIA EN ODOO DOCUMENTS
+        # VERIFICAR DUPLICADO EN ODOO
         # =========================================================
 
         doc_existe = models.execute_kw(
@@ -167,23 +148,19 @@ def procesar_sincronizacion(payload: dict):
             "documents.document",
             "search_count",
             [[
-                ["folder_id", "=", ODOO_DOCUMENTS_FOLDER_ID],
                 ["name", "=", f"Expediente - {nombre_aspirante}"]
             ]]
         )
 
         if doc_existe:
-            logging.info("Ya existe expediente, saltando")
+            logging.info("Ya existe expediente, skip")
             return
 
         # =========================================================
-        # CREAR CARPETA CANDIDATO
+        # CARPETA ONEDRIVE
         # =========================================================
 
-        url_folder = (
-            f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
-            f"{raiz_id}/children"
-        )
+        url_folder = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{raiz_id}/children"
 
         r = requests.post(url_folder, json={
             "name": nombre_aspirante,
@@ -195,7 +172,7 @@ def procesar_sincronizacion(payload: dict):
         folder_id = r.json()["id"]
 
         # =========================================================
-        # SUBIR ARCHIVOS
+        # UPLOAD
         # =========================================================
 
         archivos_ok = 0
@@ -220,10 +197,7 @@ def procesar_sincronizacion(payload: dict):
                 file_name = limpiar_nombre(a["name"])
                 content = base64.b64decode(a["datas"])
 
-                url_upload = (
-                    f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
-                    f"{folder_id}:/{file_name}:/content"
-                )
+                url_upload = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}:/{file_name}:/content"
 
                 r = requests.put(
                     url_upload,
@@ -238,13 +212,10 @@ def procesar_sincronizacion(payload: dict):
                 archivos_ok += 1
 
         # =========================================================
-        # LINK
+        # CREATE LINK (BLINDADO)
         # =========================================================
 
-        url_link = (
-            f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
-            f"{folder_id}/createLink"
-        )
+        url_link = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}/createLink"
 
         r = requests.post(url_link, json={
             "type": "view",
@@ -253,13 +224,19 @@ def procesar_sincronizacion(payload: dict):
 
         r.raise_for_status()
 
-        onedrive_url = r.json().get("link", {}).get("webUrl")
+        res = r.json()
+        logging.info(f"GRAPH RESPONSE: {res}")
+
+        onedrive_url = (
+            res.get("link", {}).get("webUrl")
+            or res.get("webUrl")
+        )
 
         if not onedrive_url:
-            raise Exception("No se generó link")
+            raise Exception(f"No se pudo obtener URL. Response: {res}")
 
         # =========================================================
-        # ODOO DOCUMENT
+        # ODOO CREATE
         # =========================================================
 
         doc_id = models.execute_kw(
@@ -276,13 +253,13 @@ def procesar_sincronizacion(payload: dict):
             }]
         )
 
-        logging.info(f"Documento creado {doc_id}")
+        logging.info(f"ODOO DOC CREATED: {doc_id}")
 
         # =========================================================
-        # DELETE ATTACHMENTS (SEGURO)
+        # DELETE ATTACHMENTS (SOLO SI TODO OK)
         # =========================================================
 
-        if DELETE_ATTACHMENTS and attachment_ids and archivos_ok == len(attachment_ids):
+        if DELETE_ATTACHMENTS and archivos_ok == len(attachment_ids):
 
             models.execute_kw(
                 ODOO_DB,
@@ -293,10 +270,10 @@ def procesar_sincronizacion(payload: dict):
                 [attachment_ids]
             )
 
-            logging.info("Adjuntos eliminados correctamente")
+            logging.info("Adjuntos eliminados OK")
 
     except Exception as e:
-        logging.exception(f"Error: {str(e)}")
+        logging.exception(f"ERROR: {str(e)}")
 
 
 # =====================================================================
