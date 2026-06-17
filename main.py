@@ -3,24 +3,16 @@ import logging
 import os
 import re
 import xmlrpc.client
-
 import requests
 from fastapi import FastAPI, Request, BackgroundTasks
 
-# =====================================================================
-# LOGGING
-# =====================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = FastAPI()
 
-# =====================================================================
-# CONFIGURACIÓN
-# =====================================================================
+# =========================
+# CONFIG
+# =========================
 
 ODOO_URL = "https://yep.yafrel.com"
 ODOO_DB = "yafrel-education-platform"
@@ -34,278 +26,149 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 
 MICROSOFT_USER_EMAIL = "yafrelservices@yafrel.com"
 
-ODOO_DOCUMENTS_FOLDER_ID = 1
-
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 DELETE_ATTACHMENTS = True
 
+# carpeta FIJA (evita caos)
+BASE_FOLDER_NAME = "Yafrel Medical Care"
 
-# =====================================================================
-# VALIDACIÓN
-# =====================================================================
+# =========================
+# VALIDACION
+# =========================
 
-required_vars = {
-    "ODOO_PASSWORD": ODOO_PASSWORD,
-    "AZURE_TENANT_ID": AZURE_TENANT_ID,
-    "AZURE_CLIENT_ID": AZURE_CLIENT_ID,
-    "AZURE_CLIENT_SECRET": AZURE_CLIENT_SECRET,
-}
+if not all([ODOO_PASSWORD, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET]):
+    raise RuntimeError("Faltan variables de entorno")
 
-missing = [k for k, v in required_vars.items() if not v]
+# =========================
+# HELPERS
+# =========================
 
-if missing:
-    raise RuntimeError(f"Faltan variables de entorno: {', '.join(missing)}")
-
-
-# =====================================================================
-# UTILIDADES
-# =====================================================================
-
-def limpiar_nombre(nombre: str) -> str:
+def limpiar(nombre):
     return re.sub(r'[<>:"/\\|?*]', "_", nombre).strip()
 
-
-def obtener_token_azure() -> str:
+def token():
     url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
-
-    data = {
+    r = requests.post(url, data={
         "grant_type": "client_credentials",
         "client_id": AZURE_CLIENT_ID,
         "client_secret": AZURE_CLIENT_SECRET,
         "scope": "https://graph.microsoft.com/.default"
-    }
-
-    r = requests.post(url, data=data)
+    })
     r.raise_for_status()
     return r.json()["access_token"]
 
+def headers():
+    return {"Authorization": f"Bearer {token()}"}
 
-def get_headers():
-    token = obtener_token_azure()
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+# =========================
+# ROOT FIX (NO DUPLICAR)
+# =========================
 
-
-# =====================================================================
-# CARPETA BASE STABLE
-# =====================================================================
-
-def obtener_o_crear_carpeta_raiz(headers):
-
+def get_base_folder():
     url = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
-
-    r = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers())
     r.raise_for_status()
 
-    for item in r.json().get("value", []):
-        if item.get("name") == "Yafrel Medical Care":
-            return item["id"]
+    for f in r.json().get("value", []):
+        if f["name"] == BASE_FOLDER_NAME:
+            return f["id"]
 
     r = requests.post(url, json={
-        "name": "Yafrel Medical Care",
-        "folder": {},
-        "@microsoft.graph.conflictBehavior": "rename"
+        "name": BASE_FOLDER_NAME,
+        "folder": {}
     }, headers=headers)
 
     r.raise_for_status()
     return r.json()["id"]
 
+# =========================
+# PROCESS
+# =========================
 
-# =====================================================================
-# PROCESAMIENTO PRINCIPAL
-# =====================================================================
+def process(payload):
 
-def procesar_sincronizacion(payload: dict):
+    applicant_id = payload.get("id")
+    name = limpiar(payload.get("display_name") or f"Candidato_{applicant_id}")
 
-    try:
-        applicant_id = payload.get("id")
+    logging.info(f"Procesando {name} ({applicant_id})")
 
-        nombre_aspirante = limpiar_nombre(
-            payload.get("display_name", f"Candidato_{applicant_id}")
-        )
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-        attachment_ids = payload.get("attachment_ids", [])
+    base_id = get_base_folder()
 
-        logging.info(f"Procesando {nombre_aspirante} ({applicant_id})")
+    # ODOO check
+    exists = models.execute_kw(
+        ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
+        "documents.document", "search_count",
+        [[["name", "=", f"Expediente - {name}"]]]
+    )
 
-        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    if exists:
+        logging.info("Ya existe en ODOO")
+        return
 
-        headers = get_headers()
-        raiz_id = obtener_o_crear_carpeta_raiz(headers)
+    # CREATE folder (SIN rename)
+    url = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{base_id}/children"
 
-        # =========================================================
-        # ODOO DOCUMENT EXIST / GET
-        # =========================================================
+    r = requests.post(url, json={
+        "name": f"{applicant_id}_{name}",
+        "folder": {},
+        "@microsoft.graph.conflictBehavior": "fail"
+    }, headers=headers())
 
-        existing = models.execute_kw(
-            ODOO_DB,
-            ODOO_USER_ID,
-            ODOO_PASSWORD,
-            "documents.document",
-            "search",
-            [[
-                ["name", "=", f"Expediente - {nombre_aspirante}"]
-            ]],
-            {"limit": 1}
-        )
+    # si falla por duplicado → NO crear otra
+    if r.status_code not in (200, 201):
+        logging.error(f"Folder error: {r.text}")
+        return
 
-        # =========================================================
-        # CARPETA ONE DRIVE (ID-BASED)
-        # =========================================================
+    folder_id = r.json()["id"]
 
-        folder_key = f"{applicant_id}_{nombre_aspirante}"
+    # CREATE SHARE LINK
+    link = requests.post(
+        f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}/createLink",
+        json={"type": "view", "scope": "organization"},
+        headers=headers()
+    )
 
-        url_folder = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{raiz_id}/children"
+    link.raise_for_status()
 
-        r = requests.post(url_folder, json={
-            "name": folder_key,
-            "folder": {},
-            "@microsoft.graph.conflictBehavior": "rename"
-        }, headers=headers)
+    url_link = link.json()["link"]["webUrl"]
 
-        r.raise_for_status()
-        folder_id = r.json()["id"]
+    # ODOO CREATE (VISIBLE GLOBAL)
+    doc_id = models.execute_kw(
+        ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
+        "documents.document", "create",
+        [{
+            "name": f"Expediente - {name}",
+            "type": "url",
+            "url": url_link
+        }]
+    )
 
-        # =========================================================
-        # UPLOAD ARCHIVOS
-        # =========================================================
+    logging.info(f"ODOO OK {doc_id}")
 
-        archivos_ok = 0
-
-        if attachment_ids:
-
-            adjuntos = models.execute_kw(
-                ODOO_DB,
-                ODOO_USER_ID,
-                ODOO_PASSWORD,
-                "ir.attachment",
-                "read",
-                [attachment_ids],
-                {"fields": ["name", "datas"]}
-            )
-
-            for a in adjuntos:
-
-                if not a.get("datas"):
-                    continue
-
-                file_name = limpiar_nombre(a["name"])
-                content = base64.b64decode(a["datas"])
-
-                url_upload = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}:/{file_name}:/content"
-
-                r = requests.put(
-                    url_upload,
-                    data=content,
-                    headers={
-                        "Authorization": headers["Authorization"],
-                        "Content-Type": "application/octet-stream"
-                    }
-                )
-
-                r.raise_for_status()
-                archivos_ok += 1
-
-        # =========================================================
-        # CREATE LINK (BLINDADO)
-        # =========================================================
-
-        url_link = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}/createLink"
-
-        r = requests.post(url_link, json={
-            "type": "view",
-            "scope": "organization"
-        }, headers=headers)
-
-        r.raise_for_status()
-
-        res = r.json()
-        logging.info(f"GRAPH RESPONSE: {res}")
-
-        onedrive_url = (
-            res.get("link", {}).get("webUrl")
-            or res.get("webUrl")
-        )
-
-        if not onedrive_url:
-            raise Exception(f"No URL from Graph: {res}")
-
-        # =========================================================
-        # ODOO CREATE / UPDATE (FIX DEFINITIVO)
-        # =========================================================
-
-        if existing:
-            doc_id = models.execute_kw(
-                ODOO_DB,
-                ODOO_USER_ID,
-                ODOO_PASSWORD,
-                "documents.document",
-                "write",
-                [existing[0], {"url": onedrive_url}]
-            )
-            logging.info(f"ODOO UPDATED: {existing[0]}")
-
-        else:
-            doc_id = models.execute_kw(
-                ODOO_DB,
-                ODOO_USER_ID,
-                ODOO_PASSWORD,
-                "documents.document",
-                "create",
-                [{
-                    "name": f"Expediente - {nombre_aspirante}",
-                    "type": "url",
-                    "url": onedrive_url,
-                    "folder_id": ODOO_DOCUMENTS_FOLDER_ID
-                }]
-            )
-            logging.info(f"ODOO CREATED: {doc_id}")
-
-        # =========================================================
-        # DELETE ATTACHMENTS
-        # =========================================================
-
-        if DELETE_ATTACHMENTS and attachment_ids and archivos_ok == len(attachment_ids):
-
+    # DELETE attachments (solo si existe flujo real)
+    if DELETE_ATTACHMENTS:
+        att = payload.get("attachment_ids") or []
+        if att:
             models.execute_kw(
-                ODOO_DB,
-                ODOO_USER_ID,
-                ODOO_PASSWORD,
-                "ir.attachment",
-                "unlink",
-                [attachment_ids]
+                ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
+                "ir.attachment", "unlink",
+                [att]
             )
 
-            logging.info("Adjuntos eliminados OK")
-
-    except Exception as e:
-        logging.exception(f"ERROR: {str(e)}")
-
-
-# =====================================================================
+# =========================
 # WEBHOOK
-# =====================================================================
+# =========================
 
 @app.post("/webhook")
-async def webhook(request: Request, background_tasks: BackgroundTasks):
-
-    payload = await request.json()
-
-    if not payload.get("id"):
-        return {"status": "ignored"}
-
-    background_tasks.add_task(procesar_sincronizacion, payload)
-
-    return {"status": "ok"}
-
-
-# =====================================================================
-# HEALTH
-# =====================================================================
+async def webhook(req: Request, bg: BackgroundTasks):
+    data = await req.json()
+    if data.get("id"):
+        bg.add_task(process, data)
+    return {"ok": True}
 
 @app.get("/")
 def health():
-    return {"status": "running"}
+    return {"status": "ok"}
