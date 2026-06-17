@@ -7,6 +7,10 @@ import xmlrpc.client
 import requests
 from fastapi import FastAPI, Request, BackgroundTasks
 
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -15,17 +19,13 @@ logging.basicConfig(
 app = FastAPI()
 
 # --------------------------------------------------
-# ODOO
+# ENV
 # --------------------------------------------------
 
 ODOO_URL = os.getenv("ODOO_URL")
 ODOO_DB = os.getenv("ODOO_DB")
 ODOO_USER_ID = int(os.getenv("ODOO_USER_ID", "2"))
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
-
-# --------------------------------------------------
-# MICROSOFT
-# --------------------------------------------------
 
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID")
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID")
@@ -34,10 +34,6 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 MICROSOFT_DRIVE_USER = os.getenv("MICROSOFT_DRIVE_USER")
 
 GRAPH = "https://graph.microsoft.com/v1.0"
-
-# --------------------------------------------------
-# CONFIG
-# --------------------------------------------------
 
 ONEDRIVE_ROOT_FOLDER = os.getenv(
     "ONEDRIVE_ROOT_FOLDER",
@@ -66,7 +62,11 @@ required = [
 ]
 
 if not all(required):
-    raise RuntimeError("Missing required environment variables")
+    raise RuntimeError(
+        "Missing required environment variables"
+    )
+
+# --------------------------------------------------
 
 
 def clean(text):
@@ -77,7 +77,12 @@ def clean(text):
     ).strip()
 
 
+# --------------------------------------------------
+
+
 def get_token():
+
+    logging.info("Getting Microsoft token")
 
     url = (
         f"https://login.microsoftonline.com/"
@@ -96,16 +101,28 @@ def get_token():
 
     r.raise_for_status()
 
+    logging.info("Microsoft token acquired")
+
     return r.json()["access_token"]
 
 
-def graph_headers(token):
+# --------------------------------------------------
+
+
+def headers(token):
     return {
         "Authorization": f"Bearer {token}"
     }
 
 
+# --------------------------------------------------
+
+
 def get_root_folder(token):
+
+    logging.info(
+        f"Looking for root folder '{ONEDRIVE_ROOT_FOLDER}'"
+    )
 
     url = (
         f"{GRAPH}/users/"
@@ -115,14 +132,24 @@ def get_root_folder(token):
 
     r = requests.get(
         url,
-        headers=graph_headers(token)
+        headers=headers(token)
     )
 
     r.raise_for_status()
 
     for item in r.json().get("value", []):
+
         if item["name"] == ONEDRIVE_ROOT_FOLDER:
+
+            logging.info(
+                f"Root folder found id={item['id']}"
+            )
+
             return item["id"]
+
+    logging.info(
+        "Root folder not found, creating"
+    )
 
     r = requests.post(
         url,
@@ -130,12 +157,21 @@ def get_root_folder(token):
             "name": ONEDRIVE_ROOT_FOLDER,
             "folder": {}
         },
-        headers=graph_headers(token)
+        headers=headers(token)
     )
 
     r.raise_for_status()
 
-    return r.json()["id"]
+    folder_id = r.json()["id"]
+
+    logging.info(
+        f"Root folder created id={folder_id}"
+    )
+
+    return folder_id
+
+
+# --------------------------------------------------
 
 
 def get_candidate_folder(
@@ -143,6 +179,10 @@ def get_candidate_folder(
     root_id,
     candidate_name
 ):
+
+    logging.info(
+        f"Looking for candidate folder '{candidate_name}'"
+    )
 
     url = (
         f"{GRAPH}/users/"
@@ -152,14 +192,24 @@ def get_candidate_folder(
 
     r = requests.get(
         url,
-        headers=graph_headers(token)
+        headers=headers(token)
     )
 
     r.raise_for_status()
 
     for item in r.json().get("value", []):
+
         if item["name"] == candidate_name:
+
+            logging.info(
+                f"Candidate folder exists id={item['id']}"
+            )
+
             return item["id"]
+
+    logging.info(
+        "Candidate folder not found, creating"
+    )
 
     r = requests.post(
         url,
@@ -168,37 +218,36 @@ def get_candidate_folder(
             "folder": {},
             "@microsoft.graph.conflictBehavior": "rename"
         },
-        headers=graph_headers(token)
+        headers=headers(token)
     )
 
     r.raise_for_status()
 
-    return r.json()["id"]
+    folder_id = r.json()["id"]
 
-
-def get_recruitment_folder(models):
-
-    result = models.execute_kw(
-        ODOO_DB,
-        ODOO_USER_ID,
-        ODOO_PASSWORD,
-        "documents.document",
-        "search_read",
-        [[
-            ["name", "=", ODOO_RECRUITMENT_FOLDER],
-            ["type", "=", "folder"]
-        ]],
-        {"limit": 1}
+    logging.info(
+        f"Candidate folder created id={folder_id}"
     )
 
-    return result[0]["id"] if result else False
+    return folder_id
+
+
+# --------------------------------------------------
 
 
 def process(payload):
 
     try:
 
-        applicant_id = payload["id"]
+        logging.info(
+            "================================================="
+        )
+
+        logging.info(
+            f"Payload received: {payload}"
+        )
+
+        applicant_id = payload.get("id")
 
         candidate_name = clean(
             payload.get("display_name")
@@ -211,7 +260,11 @@ def process(payload):
         )
 
         logging.info(
-            f"Processing {candidate_name}"
+            f"Candidate: {candidate_name}"
+        )
+
+        logging.info(
+            f"Attachment IDs: {attachment_ids}"
         )
 
         token = get_token()
@@ -220,9 +273,9 @@ def process(payload):
             f"{ODOO_URL}/xmlrpc/2/object"
         )
 
-        # -------------------------
+        # --------------------------------------------------
         # ONEDRIVE
-        # -------------------------
+        # --------------------------------------------------
 
         root_id = get_root_folder(token)
 
@@ -232,7 +285,13 @@ def process(payload):
             candidate_name
         )
 
-        uploaded = 0
+        # --------------------------------------------------
+        # ATTACHMENTS
+        # --------------------------------------------------
+
+        logging.info(
+            "Reading attachments from Odoo"
+        )
 
         attachments = models.execute_kw(
             ODOO_DB,
@@ -243,21 +302,45 @@ def process(payload):
             [attachment_ids],
             {
                 "fields": [
+                    "id",
                     "name",
                     "datas"
                 ]
             }
         )
 
+        logging.info(
+            f"Attachments returned by Odoo: {len(attachments)}"
+        )
+
+        for att in attachments:
+
+            logging.info(
+                f"Attachment "
+                f"id={att.get('id')} "
+                f"name={att.get('name')} "
+                f"datas={'YES' if att.get('datas') else 'NO'}"
+            )
+
         valid_attachments = [
             a for a in attachments
             if a.get("datas")
         ]
 
+        logging.info(
+            f"Valid attachments: {len(valid_attachments)}"
+        )
+
+        uploaded = 0
+
         for att in valid_attachments:
 
-            file_name = clean(
+            filename = clean(
                 att["name"]
+            )
+
+            logging.info(
+                f"Uploading {filename}"
             )
 
             content = base64.b64decode(
@@ -269,7 +352,7 @@ def process(payload):
                 f"{MICROSOFT_DRIVE_USER}"
                 f"/drive/items/"
                 f"{candidate_folder_id}"
-                f":/{file_name}:/content"
+                f":/{filename}:/content"
             )
 
             r = requests.put(
@@ -283,13 +366,25 @@ def process(payload):
                 }
             )
 
+            logging.info(
+                f"Upload status={r.status_code}"
+            )
+
             r.raise_for_status()
 
             uploaded += 1
 
-        # -------------------------
+        logging.info(
+            f"Uploaded files: {uploaded}"
+        )
+
+        # --------------------------------------------------
         # SHARE LINK
-        # -------------------------
+        # --------------------------------------------------
+
+        logging.info(
+            "Creating OneDrive link"
+        )
 
         r = requests.post(
             f"{GRAPH}/users/"
@@ -301,71 +396,85 @@ def process(payload):
                 "type": "view",
                 "scope": "organization"
             },
-            headers=graph_headers(token)
+            headers=headers(token)
+        )
+
+        logging.info(
+            f"createLink status={r.status_code}"
         )
 
         r.raise_for_status()
 
         web_url = r.json()["link"]["webUrl"]
 
-        # -------------------------
-        # ODOO DOCUMENTS
-        # -------------------------
-
-        recruitment_folder_id = (
-            get_recruitment_folder(models)
+        logging.info(
+            f"Link created: {web_url}"
         )
 
-        if not recruitment_folder_id:
-            raise Exception(
-                "Recruitment folder not found"
-            )
+        # --------------------------------------------------
+        # DOCUMENTS
+        # --------------------------------------------------
 
-        doc_name = (
-            f"Candidate Profile - "
-            f"{candidate_name}"
+        logging.info(
+            "Searching Recruitment folder"
         )
 
-        existing = models.execute_kw(
+        folders = models.execute_kw(
             ODOO_DB,
             ODOO_USER_ID,
             ODOO_PASSWORD,
             "documents.document",
-            "search_count",
-            [[
-                ["folder_id", "=",
-                 recruitment_folder_id],
-                ["name", "=",
-                 doc_name]
-            ]]
+            "search_read",
+            [[]],
+            {
+                "fields": [
+                    "id",
+                    "name",
+                    "type"
+                ],
+                "limit": 50
+            }
         )
 
-        if not existing:
+        logging.info(
+            f"Documents sample: {folders}"
+        )
 
-            models.execute_kw(
-                ODOO_DB,
-                ODOO_USER_ID,
-                ODOO_PASSWORD,
-                "documents.document",
-                "create",
-                [{
-                    "name": doc_name,
-                    "type": "url",
-                    "url": web_url,
-                    "folder_id":
-                        recruitment_folder_id
-                }]
-            )
+        logging.info(
+            "Creating URL document"
+        )
 
-        # -------------------------
-        # DELETE ATTACHMENTS
-        # -------------------------
+        doc_id = models.execute_kw(
+            ODOO_DB,
+            ODOO_USER_ID,
+            ODOO_PASSWORD,
+            "documents.document",
+            "create",
+            [{
+                "name":
+                    f"Candidate Profile - {candidate_name}",
+                "type": "url",
+                "url": web_url
+            }]
+        )
+
+        logging.info(
+            f"Document created id={doc_id}"
+        )
+
+        # --------------------------------------------------
+        # DELETE
+        # --------------------------------------------------
 
         if (
             DELETE_ATTACHMENTS
             and valid_attachments
             and uploaded == len(valid_attachments)
         ):
+
+            logging.info(
+                "Deleting Odoo attachments"
+            )
 
             models.execute_kw(
                 ODOO_DB,
@@ -377,18 +486,21 @@ def process(payload):
             )
 
             logging.info(
-                f"Deleted {len(attachment_ids)} "
-                f"attachments from Odoo"
+                "Attachments deleted"
             )
 
         logging.info(
-            f"Completed: {candidate_name}"
+            f"SUCCESS: {candidate_name}"
         )
 
-    except Exception:
+    except Exception as e:
+
         logging.exception(
-            "Applicant processing failed"
+            f"PROCESS ERROR: {e}"
         )
+
+
+# --------------------------------------------------
 
 
 @app.post("/webhook")
@@ -399,15 +511,19 @@ async def webhook(
 
     payload = await request.json()
 
-    if payload.get("id"):
-        background_tasks.add_task(
-            process,
-            payload
-        )
+    background_tasks.add_task(
+        process,
+        payload
+    )
 
     return {"ok": True}
 
 
+# --------------------------------------------------
+
+
 @app.get("/")
 def health():
-    return {"status": "running"}
+    return {
+        "status": "running"
+    }
