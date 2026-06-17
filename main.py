@@ -141,6 +141,48 @@ def process(payload):
 
         r.raise_for_status()
         folder_id = r.json()["id"]
+    # =========================================================
+    # SUBIR ARCHIVOS
+    # =========================================================
+
+        archivos_ok = 0
+
+        if attachment_ids:
+
+            adjuntos = models.execute_kw(
+                ODOO_DB,
+                ODOO_USER_ID,
+                ODOO_PASSWORD,
+                "ir.attachment",
+                "read",
+                [attachment_ids],
+                {"fields": ["name", "datas"]}
+            )
+
+            for a in adjuntos:
+
+                if not a.get("datas"):
+                    continue
+
+                file_name = limpiar_nombre(a["name"])
+                content = base64.b64decode(a["datas"])
+
+                url_upload = (
+                    f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/"
+                    f"{folder_id}:/{file_name}:/content"
+                )
+
+                r = requests.put(
+                    url_upload,
+                    data=content,
+                    headers={
+                        "Authorization": headers["Authorization"],
+                        "Content-Type": "application/octet-stream"
+                    }
+                )
+
+                r.raise_for_status()
+                archivos_ok += 1
 
     # =========================
     # CREATE LINK (ALWAYS WORKS)
