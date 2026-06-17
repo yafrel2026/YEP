@@ -26,26 +26,25 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 
 MICROSOFT_USER_EMAIL = "yafrelservices@yafrel.com"
 
-GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+GRAPH = "https://graph.microsoft.com/v1.0"
+
+BASE_FOLDER = "Recruitment"
 
 DELETE_ATTACHMENTS = True
-
-# carpeta FIJA (evita caos)
-BASE_FOLDER_NAME = "Yafrel Medical Care"
 
 # =========================
 # VALIDACION
 # =========================
 
 if not all([ODOO_PASSWORD, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET]):
-    raise RuntimeError("Faltan variables de entorno")
+    raise RuntimeError("Missing env vars")
 
 # =========================
 # HELPERS
 # =========================
 
-def limpiar(nombre):
-    return re.sub(r'[<>:"/\\|?*]', "_", nombre).strip()
+def clean(name):
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
 
 def token():
     url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
@@ -62,22 +61,22 @@ def headers():
     return {"Authorization": f"Bearer {token()}"}
 
 # =========================
-# ROOT FIX (NO DUPLICAR)
+# GET / CREATE ROOT (RECRUITMENT)
 # =========================
 
-def get_base_folder():
-    url = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
+def get_recruitment_folder():
+    url = f"{GRAPH}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
     r = requests.get(url, headers=headers())
     r.raise_for_status()
 
     for f in r.json().get("value", []):
-        if f["name"] == BASE_FOLDER_NAME:
+        if f["name"].lower() == BASE_FOLDER.lower():
             return f["id"]
 
     r = requests.post(url, json={
-        "name": BASE_FOLDER_NAME,
+        "name": BASE_FOLDER,
         "folder": {}
-    }, headers=headers)
+    }, headers=headers())
 
     r.raise_for_status()
     return r.json()["id"]
@@ -89,66 +88,80 @@ def get_base_folder():
 def process(payload):
 
     applicant_id = payload.get("id")
-    name = limpiar(payload.get("display_name") or f"Candidato_{applicant_id}")
+    name = clean(payload.get("display_name") or f"Candidate_{applicant_id}")
 
-    logging.info(f"Procesando {name} ({applicant_id})")
+    logging.info(f"Processing {name} ({applicant_id})")
 
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-    base_id = get_base_folder()
+    root_id = get_recruitment_folder()
 
-    # ODOO check
+    # =========================
+    # ODOO CHECK
+    # =========================
+
     exists = models.execute_kw(
         ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
         "documents.document", "search_count",
-        [[["name", "=", f"Expediente - {name}"]]]
+        [[["name", "=", f"Candidate Profile - {name}"]]]
     )
 
     if exists:
-        logging.info("Ya existe en ODOO")
+        logging.info("Already exists in Odoo")
         return
 
-    # CREATE folder (SIN rename)
-    url = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{base_id}/children"
+    # =========================
+    # CREATE ONE DRIVE FOLDER (NO PREFIX, NO RENAMES)
+    # =========================
+
+    url = f"{GRAPH}/users/{MICROSOFT_USER_EMAIL}/drive/items/{root_id}/children"
 
     r = requests.post(url, json={
-        "name": f"{applicant_id}_{name}",
+        "name": name,
         "folder": {},
         "@microsoft.graph.conflictBehavior": "fail"
     }, headers=headers())
 
-    # si falla por duplicado → NO crear otra
     if r.status_code not in (200, 201):
         logging.error(f"Folder error: {r.text}")
         return
 
     folder_id = r.json()["id"]
 
+    # =========================
     # CREATE SHARE LINK
+    # =========================
+
     link = requests.post(
-        f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}/createLink",
+        f"{GRAPH}/users/{MICROSOFT_USER_EMAIL}/drive/items/{folder_id}/createLink",
         json={"type": "view", "scope": "organization"},
         headers=headers()
     )
 
     link.raise_for_status()
 
-    url_link = link.json()["link"]["webUrl"]
+    weburl = link.json()["link"]["webUrl"]
 
-    # ODOO CREATE (VISIBLE GLOBAL)
+    # =========================
+    # CREATE ODOO DOCUMENT (RECRUITMENT)
+    # =========================
+
     doc_id = models.execute_kw(
         ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
         "documents.document", "create",
         [{
-            "name": f"Expediente - {name}",
+            "name": f"Candidate Profile - {name}",
             "type": "url",
-            "url": url_link
+            "url": weburl
         }]
     )
 
-    logging.info(f"ODOO OK {doc_id}")
+    logging.info(f"Odoo document created {doc_id}")
 
-    # DELETE attachments (solo si existe flujo real)
+    # =========================
+    # DELETE ATTACHMENTS (OPTIONAL)
+    # =========================
+
     if DELETE_ATTACHMENTS:
         att = payload.get("attachment_ids") or []
         if att:
@@ -171,4 +184,4 @@ async def webhook(req: Request, bg: BackgroundTasks):
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "running"}
