@@ -35,6 +35,7 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 MICROSOFT_USER_EMAIL = "yafrelservices@yafrel.com"
 
 ODOO_DOCUMENTS_FOLDER_ID = 1
+
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 DELETE_ATTACHMENTS = True
@@ -89,23 +90,21 @@ def get_headers():
 
 
 # =====================================================================
-# ROOT FOLDER
+# CARPETA BASE STABLE
 # =====================================================================
 
 def obtener_o_crear_carpeta_raiz(headers):
 
-    url_list = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
+    url = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
 
-    r = requests.get(url_list, headers=headers)
+    r = requests.get(url, headers=headers)
     r.raise_for_status()
 
     for item in r.json().get("value", []):
         if item.get("name") == "Yafrel Medical Care":
             return item["id"]
 
-    url_create = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/root/children"
-
-    r = requests.post(url_create, json={
+    r = requests.post(url, json={
         "name": "Yafrel Medical Care",
         "folder": {},
         "@microsoft.graph.conflictBehavior": "rename"
@@ -116,7 +115,7 @@ def obtener_o_crear_carpeta_raiz(headers):
 
 
 # =====================================================================
-# PROCESAMIENTO
+# PROCESAMIENTO PRINCIPAL
 # =====================================================================
 
 def procesar_sincronizacion(payload: dict):
@@ -138,32 +137,31 @@ def procesar_sincronizacion(payload: dict):
         raiz_id = obtener_o_crear_carpeta_raiz(headers)
 
         # =========================================================
-        # VERIFICAR DUPLICADO EN ODOO
+        # ODOO DOCUMENT EXIST / GET
         # =========================================================
 
-        doc_existe = models.execute_kw(
+        existing = models.execute_kw(
             ODOO_DB,
             ODOO_USER_ID,
             ODOO_PASSWORD,
             "documents.document",
-            "search_count",
+            "search",
             [[
                 ["name", "=", f"Expediente - {nombre_aspirante}"]
-            ]]
+            ]],
+            {"limit": 1}
         )
 
-        if doc_existe:
-            logging.info("Ya existe expediente, skip")
-            return
+        # =========================================================
+        # CARPETA ONE DRIVE (ID-BASED)
+        # =========================================================
 
-        # =========================================================
-        # CARPETA ONEDRIVE
-        # =========================================================
+        folder_key = f"{applicant_id}_{nombre_aspirante}"
 
         url_folder = f"{GRAPH_BASE_URL}/users/{MICROSOFT_USER_EMAIL}/drive/items/{raiz_id}/children"
 
         r = requests.post(url_folder, json={
-            "name": nombre_aspirante,
+            "name": folder_key,
             "folder": {},
             "@microsoft.graph.conflictBehavior": "rename"
         }, headers=headers)
@@ -172,7 +170,7 @@ def procesar_sincronizacion(payload: dict):
         folder_id = r.json()["id"]
 
         # =========================================================
-        # UPLOAD
+        # UPLOAD ARCHIVOS
         # =========================================================
 
         archivos_ok = 0
@@ -233,33 +231,44 @@ def procesar_sincronizacion(payload: dict):
         )
 
         if not onedrive_url:
-            raise Exception(f"No se pudo obtener URL. Response: {res}")
+            raise Exception(f"No URL from Graph: {res}")
 
         # =========================================================
-        # ODOO CREATE
+        # ODOO CREATE / UPDATE (FIX DEFINITIVO)
         # =========================================================
 
-        doc_id = models.execute_kw(
-            ODOO_DB,
-            ODOO_USER_ID,
-            ODOO_PASSWORD,
-            "documents.document",
-            "create",
-            [{
-                "name": f"Expediente - {nombre_aspirante}",
-                "type": "url",
-                "url": onedrive_url,
-                "folder_id": ODOO_DOCUMENTS_FOLDER_ID
-            }]
-        )
+        if existing:
+            doc_id = models.execute_kw(
+                ODOO_DB,
+                ODOO_USER_ID,
+                ODOO_PASSWORD,
+                "documents.document",
+                "write",
+                [existing[0], {"url": onedrive_url}]
+            )
+            logging.info(f"ODOO UPDATED: {existing[0]}")
 
-        logging.info(f"ODOO DOC CREATED: {doc_id}")
+        else:
+            doc_id = models.execute_kw(
+                ODOO_DB,
+                ODOO_USER_ID,
+                ODOO_PASSWORD,
+                "documents.document",
+                "create",
+                [{
+                    "name": f"Expediente - {nombre_aspirante}",
+                    "type": "url",
+                    "url": onedrive_url,
+                    "folder_id": ODOO_DOCUMENTS_FOLDER_ID
+                }]
+            )
+            logging.info(f"ODOO CREATED: {doc_id}")
 
         # =========================================================
-        # DELETE ATTACHMENTS (SOLO SI TODO OK)
+        # DELETE ATTACHMENTS
         # =========================================================
 
-        if DELETE_ATTACHMENTS and archivos_ok == len(attachment_ids):
+        if DELETE_ATTACHMENTS and attachment_ids and archivos_ok == len(attachment_ids):
 
             models.execute_kw(
                 ODOO_DB,
