@@ -284,7 +284,7 @@ def process(payload):
 
     except Exception as e:
         logging.exception(f"PROCESS ERROR: {e}")
- 	# --------------------------------------------------
+ 	    # --------------------------------------------------
         # DELETE
         # --------------------------------------------------
 
@@ -320,9 +320,6 @@ def process(payload):
         logging.exception(
             f"PROCESS ERROR: {e}"
         )
-
-
-
 # --------------------------------------------------
 
 @app.post("/webhook")
