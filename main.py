@@ -284,6 +284,44 @@ def process(payload):
 
     except Exception as e:
         logging.exception(f"PROCESS ERROR: {e}")
+ 	# --------------------------------------------------
+        # DELETE
+        # --------------------------------------------------
+
+        if (
+            DELETE_ATTACHMENTS
+            and valid_attachments
+            and uploaded == len(valid_attachments)
+        ):
+
+            logging.info(
+                "Deleting Odoo attachments"
+            )
+
+            models.execute_kw(
+                ODOO_DB,
+                ODOO_USER_ID,
+                ODOO_PASSWORD,
+                "ir.attachment",
+                "unlink",
+                [attachment_ids]
+            )
+
+            logging.info(
+                "Attachments deleted"
+            )
+
+        logging.info(
+            f"SUCCESS: {candidate_name}"
+        )
+
+    except Exception as e:
+
+        logging.exception(
+            f"PROCESS ERROR: {e}"
+        )
+
+
 
 # --------------------------------------------------
 
