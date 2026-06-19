@@ -45,9 +45,7 @@ ODOO_RECRUITMENT_FOLDER = os.getenv(
     "Recruitment"
 )
 
-DELETE_ATTACHMENTS = (
-    os.getenv("DELETE_ATTACHMENTS", "true").lower() == "true"
-)
+DELETE_ATTACHMENTS = os.getenv("DELETE_ATTACHMENTS")
 
 # --------------------------------------------------
 
