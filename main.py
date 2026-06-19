@@ -291,7 +291,7 @@ def process(payload):
         if (
             DELETE_ATTACHMENTS
             and valid_attachments
-            and uploaded == len(valid_attachments)
+            and uploaded == len(attachment_ids)
         ):
 
             logging.info(
