@@ -240,19 +240,13 @@ def process(payload):
         web_url = r.json()["link"]["webUrl"]
 
         # --------------------------------------------------
-        # DOCUMENTS (FIX INDENTATION)
+        # DOCUMENTS
         # --------------------------------------------------
 
         recruitment_folder = models.execute_kw(
-            ODOO_DB,
-            ODOO_USER_ID,
-            ODOO_PASSWORD,
-            "documents.document",
-            "search_read",
-            [[
-                ["name", "=", ODOO_RECRUITMENT_FOLDER],
-                ["type", "=", "folder"]
-            ]],
+            ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
+            "documents.document", "search_read",
+            [[["name", "=", ODOO_RECRUITMENT_FOLDER], ["type", "=", "folder"]]],
             {"fields": ["id", "name"], "limit": 1}
         )
 
@@ -262,11 +256,8 @@ def process(payload):
         recruitment_folder_id = recruitment_folder[0]["id"]
 
         doc_id = models.execute_kw(
-            ODOO_DB,
-            ODOO_USER_ID,
-            ODOO_PASSWORD,
-            "documents.document",
-            "create",
+            ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD,
+            "documents.document", "create",
             [{
                 "name": f"Candidate Profile - {candidate_name}",
                 "type": "url",
@@ -275,29 +266,31 @@ def process(payload):
             }]
         )
 
-        # --------------------------------------------------
-
         logging.info(f"Document created id={doc_id}")
+
+        # --------------------------------------------------
+        # DELETE (CORREGIDO: Dentro del mismo try principal)
+        # --------------------------------------------------
+        # Comparamos contra len(valid_attachments) en lugar de attachment_ids
+        if DELETE_ATTACHMENTS and valid_attachments and uploaded == len(valid_attachments):
+            logging.info("Deleting Odoo attachments")
+            
+            # Extraemos solo los IDs de los adjuntos que sí procesamos con éxito
+            ids_to_delete = [a["id"] for a in valid_attachments]
+            
+            models.execute_kw(
+                ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD, 
+                "ir.attachment", "unlink", [ids_to_delete]
+            )
+            logging.info("Attachments deleted successfully")
+        else:
+            logging.warning("Delete conditions not met or no valid attachments uploaded")
+
         logging.info(f"SUCCESS: {candidate_name}")
 
     except Exception as e:
         logging.exception(f"PROCESS ERROR: {e}")
-# --------------------------------------------------
-# DELETE
-# --------------------------------------------------
-try:
-    if ( DELETE_ATTACHMENTS and uploaded == len(attachment_ids) ):
-        logging.info( "Deleting Odoo attachments" )
-        models.execute_kw(
-            ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD, 
-            "ir.attachment", "unlink", [attachment_ids]
-        )
-        logging.info( "Attachments deleted" )
-    
-    logging.info( f"SUCCESS: {candidate_name}" )
 
-except Exception as e:
-    logging.exception( f"PROCESS ERROR: {e}" )
 # --------------------------------------------------
 
 @app.post("/webhook")
