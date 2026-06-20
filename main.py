@@ -282,11 +282,11 @@ def process(payload):
 
     except Exception as e:
         logging.exception(f"PROCESS ERROR: {e}")
- 	    # --------------------------------------------------
+# --------------------------------------------------
 # DELETE
 # --------------------------------------------------
 try:
-    if ( DELETE_ATTACHMENTS and valid_attachments and uploaded == len(attachment_ids) ):
+    if ( DELETE_ATTACHMENTS and uploaded == len(attachment_ids) ):
         logging.info( "Deleting Odoo attachments" )
         models.execute_kw(
             ODOO_DB, ODOO_USER_ID, ODOO_PASSWORD, 
