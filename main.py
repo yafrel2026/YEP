@@ -287,8 +287,9 @@ def process(payload):
         # --------------------------------------------------
 
         if (
+             logging.info(
+                "Begin Deleting Odoo attachments"
             DELETE_ATTACHMENTS
-            and valid_attachments
             and uploaded == len(attachment_ids)
         ):
 
